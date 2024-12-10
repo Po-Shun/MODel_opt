@@ -38,9 +38,10 @@ class ILPSolver:
         self.extra_params = extra_params
         self.num_constraints = 0
         if solver == "GUROBI" or solver == "gurobi":
-            with get_gurobi_env() as env:
-                env.setParam("OutputFlag", logging.DEBUG >= logger.root.level)
-                self.model = gr.Model("gurobi", env=env)
+            self.model = gr.Model("gurobi")
+            # with get_gurobi_env() as env:
+            #     env.setParam("OutputFlag", logging.DEBUG >= logger.root.level)
+            #     self.model = gr.Model("gurobi")
         else:
             raise Exception("Currently only Gurobi solver is supported.")
         self._message_callback = None

@@ -226,7 +226,8 @@ class Graph:
         if not name:
             raise ValueError("name not provided.")
 
-        name = name.replace("*", ".*")
+        name = str(name).replace("*", ".*")
+        name = re.escape(str(name))
         regex = re.compile(f"^{name}$")
         matching_node_names = list(filter(regex.match, self.nodes.keys()))
 

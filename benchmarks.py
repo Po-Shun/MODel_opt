@@ -12,7 +12,7 @@ from collections import OrderedDict
 from multiprocessing import Process
 
 import pandas as pd
-
+import csv
 import torch
 import torch.fx
 import torchaudio
@@ -449,6 +449,38 @@ class Benchmark:
         stop = time.time()
         simulated_peak_mem_usage, mem_per_timestep = s.Simulate(node_order)
         return (simulated_peak_mem_usage, stop - start)
+    def run_node_ordering_v2(self, g, fx_graph, fx_to_df_map, alpha : int, beta : int, mix_approach, rematerialization):
+        start = time.time()
+        s = training_graph_optimizer.Scheduler(
+            g, rel_stop=0.005, timeout_s=args.solver_timeout
+        )
+        summary, schedule, mem_loc = s.ComputeOptimalSchedule_V2(
+            allow_swaps=False,
+            max_spills=0,
+            allow_rematerialization=rematerialization,
+            alpha=alpha,
+            mix_approach=mix_approach,
+            beta=beta,
+        )
+        stop = time.time()
+
+        assert utils.validate_timeline(schedule)
+        assert utils.validate_node_ordering(g, schedule)
+        assert summary["peak_mem_usage"] == summary["required_memory"]
+        # assert summary["peak_mem_usage"] <= simulated_peak_mem_usage
+        assert summary["total_data_swapped"] == 0
+
+        node_ordering = utils.extract_node_ordering(g, schedule)
+
+        try:
+            fx_opt = FXOptimizer(fx_graph, fx_to_df_map)
+            fx_opt.Reorder(node_ordering)
+            fx_graph_opt = fx_opt.fx_trace
+        except Exception as e:
+            print(f"  FAILED TO EXPORT NODE REORDERD SOLUTON FOR {model} TO FX:\n{traceback.format_exc()}")
+            fx_graph_opt = None
+
+        return (summary["peak_mem_usage"], node_ordering, fx_graph_opt, stop - start)
 
     def run_node_ordering(self, g, fx_graph, fx_to_df_map):
         start = time.time()
@@ -504,7 +536,32 @@ class Benchmark:
         visualizer.draw_schedule(schedule, img_path="/tmp/" + g.name + ".png")
 
         return (peak_mem_usage, fragmentation, stop - start)
-
+    
+    def run_rematerialization_v2(self, g, memory_budget, alpha, beta, mix_approach, rematerialization):
+        start = time.time()
+        s = training_graph_optimizer.Scheduler(
+            g, rel_stop=0.01, timeout_s=args.solver_timeout
+        )
+        summary, schedule, mem_loc = s.ComputeOptimalSchedule_V2(
+            allow_swaps=False,
+            max_spills=0,
+            allow_rematerialization=rematerialization,
+            alpha=alpha,
+            beta=beta,
+            mix_approach=mix_approach,
+            mem_limit=memory_budget,
+        )
+        stop = time.time()
+        extra_runtime = summary["rematerialization_time"]
+        model_runtime = 0
+        for n in g.nodes.values():
+            if not n.time:
+                continue
+            model_runtime += n.time
+        assert utils.validate_timeline(schedule)
+        assert summary["peak_mem_usage"] == summary["required_memory"]
+        assert summary["total_data_swapped"] == 0
+        return (extra_runtime / model_runtime, stop - start)
     def run_rematerialization(self, g, memory_budget):
         start = time.time()
         s = training_graph_optimizer.Scheduler(
@@ -513,6 +570,7 @@ class Benchmark:
         summary, schedule, mem_loc = s.ComputeOptimalSchedule(
             allow_swaps=False,
             allow_rematerialization=True,
+            max_spills = 0,
             mem_limit=memory_budget,
         )
         stop = time.time()
@@ -552,39 +610,54 @@ class Benchmark:
         return (extra_runtime / model_runtime, stop - start)
 
 
+# BENCHMARKS = {
+#     "alexnet": ["eval", "train"],
+#     "bert": ["eval", "train"],
+#     # "conformer": ["eval", "train"],  # fx can't trace the model
+#     # "deeplab": ["eval"],  # Train mode doesn't load
+#     "efficientnet": ["eval", "train"],
+#     # "emformer": ["eval", "train"],  # fx can't trace the model
+#     "googlenet": ["eval", "train"],
+#     "inception": ["eval", "train"],
+#     "mnasnet": ["eval", "train"],
+#     "mobilenet": ["eval", "train"],
+#     # "raft": ["eval", "train"],  # Model fails to load
+#     "resnet": ["eval", "train"],
+#     "resnet50": ["eval", "train"],
+#     "resnet3d": ["eval", "train"],
+#     "squeezenet": ["eval", "train"],
+#     # "ssd": ["eval"],  # Needs target in train mode
+#     # "swin": ["eval"],  # Model fails sanity checks
+#     "transformer": ["eval", "train"],
+#     "transformer_dflt": ["eval", "train"],
+#     "vgg": ["eval", "train"],
+#     "vgg16": ["eval", "train"],
+#     "vgg19": ["eval", "train"],
+#     "vit": ["eval", "train"],
+#     "xlmr": ["eval", "train"],
+#     "opt-125m": ["eval", "train"],
+#     "opt-350m": ["eval", "train"],
+#     "opt-1.3b": ["eval", "train"],
+#     "opt-2.7b": ["eval", "train"],
+#     "opt-6.7b": ["eval", "train"],
+#     "opt-13b": ["eval", "train"],
+#     "opt-30b": ["eval", "train"],
+#     "opt-66b": ["eval", "train"],
+# }
+
 BENCHMARKS = {
-    "alexnet": ["eval", "train"],
-    "bert": ["eval", "train"],
-    # "conformer": ["eval", "train"],  # fx can't trace the model
-    # "deeplab": ["eval"],  # Train mode doesn't load
-    "efficientnet": ["eval", "train"],
-    # "emformer": ["eval", "train"],  # fx can't trace the model
-    "googlenet": ["eval", "train"],
-    "inception": ["eval", "train"],
+    "alexnet": ["train"],
+    "googlenet": ["train"],
     "mnasnet": ["eval", "train"],
-    "mobilenet": ["eval", "train"],
-    # "raft": ["eval", "train"],  # Model fails to load
-    "resnet": ["eval", "train"],
-    "resnet50": ["eval", "train"],
-    "resnet3d": ["eval", "train"],
-    "squeezenet": ["eval", "train"],
-    # "ssd": ["eval"],  # Needs target in train mode
-    # "swin": ["eval"],  # Model fails sanity checks
-    "transformer": ["eval", "train"],
-    "transformer_dflt": ["eval", "train"],
-    "vgg": ["eval", "train"],
-    "vgg16": ["eval", "train"],
-    "vgg19": ["eval", "train"],
-    "vit": ["eval", "train"],
-    "xlmr": ["eval", "train"],
-    "opt-125m": ["eval", "train"],
-    "opt-350m": ["eval", "train"],
-    "opt-1.3b": ["eval", "train"],
-    "opt-2.7b": ["eval", "train"],
-    "opt-6.7b": ["eval", "train"],
-    "opt-13b": ["eval", "train"],
-    "opt-30b": ["eval", "train"],
-    "opt-66b": ["eval", "train"],
+    "mobilenet": ["train"],
+    "resnet": ["train"],
+    "resnet50": ["train"],
+    "resnet3d": ["train"],
+    "squeezenet": ["train"],
+    "transformer": ["train"],
+    "vgg": ["train"],
+    "vgg16": ["train"],
+    "vgg19": ["train"],
 }
 
 
@@ -599,7 +672,7 @@ parser.add_argument("--distributed", action="store_true", help="Distribute among
 
 parser.add_argument("--seq-len", type=int, default=None, help="Sequence length for text/speech/sequence models. If not specified, use the model's maximum length")
 
-parser.add_argument("--solver-timeout", type=int, default=1800, help="ILP solver timeout in seconds")
+parser.add_argument("--solver-timeout", type=int, default=6000, help="ILP solver timeout in seconds")
 parser.add_argument("--render-models", action="store_true")
 parser.add_argument("--memory-profile", action="store_true")
 parser.add_argument("--time-profile", action="store_true")
@@ -617,8 +690,10 @@ parser.add_argument("--generate-addresses", action="store_true")
 parser.add_argument("--rematerialization", action="store_true")
 
 parser.add_argument("--spilling", action="store_true")
-
+parser.add_argument("--collected_data", default="data.csv")
+parser.add_argument("--find_coefficient", action="store_true")
 parser.add_argument("--log-path", "--log_path", default="/tmp/opt4ml_benchmarks.csv")
+parser.add_argument("--v2", action="store_true")
 parser.add_argument("-a", "--append-log", action="store_true")
 parser.add_argument(
     '-d', '--debug',
@@ -641,7 +716,12 @@ if __name__ == "__main__":
     b = Benchmark()
 
     results = []
-
+    model_name = list()
+    b_size = list()
+    peak_memory_usage_bef_opt = list()
+    peak_memory_optimized_usage = list()
+    memory_reduction = list()
+    proc_time = list()
     for model in args.model:
         modes = BENCHMARKS[model] if not args.mode else args.mode
         for mode in modes:
@@ -658,7 +738,7 @@ if __name__ == "__main__":
                 profile = []
                 warm_up_iters = 1 if args.warm_up_iters is None else args.warm_up_iters
                 profile_iters = 10 if args.profile_iters is None else args.profile_iters
-                if args.time_profile or args.rematerialization or args.spilling:
+                if args.time_profile or args.rematerialization or args.spilling or args.v2:
                     profile.append("time")
                 if args.memory_profile:
                     torch.cuda.empty_cache()
@@ -713,7 +793,6 @@ if __name__ == "__main__":
                     result[
                         "profile.allocated_mem_at_peak"
                     ] = graph.allocated_mem_at_peak / GB
-
                 if not args.skip_simulation:
                     simulated_peak_mem_usage, _ = b.run_simulation(
                         graph,
@@ -723,6 +802,9 @@ if __name__ == "__main__":
                         f"  SIMULATED PEAK MEM USAGE IS {simulated_peak_mem_usage / GB:.4f} GB",
                         flush=True,
                     )
+                    model_name.append(model)
+                    b_size.append(batch_size)
+                    peak_memory_usage_bef_opt.append(round(simulated_peak_mem_usage/GB, 4))
                     result["simulated.peak_mem_usage"] = simulated_peak_mem_usage / GB
 
                 if args.profile_alloc_time:
@@ -734,6 +816,38 @@ if __name__ == "__main__":
                     )
                     result["profile.alloc_runtime"] = runtime
                     result["profile.alloc_count"] = alloc_count
+                if args.find_coefficient:
+                    print("!!!!!! find")
+                    cof_a = list()
+                    cof_b = list()
+                    memory_usage = list()
+                    memory_reduction = list()
+                    for alpha in range(1,2):
+                        for beta in range(1,2):
+                            (
+                                peak_mem_usage,
+                                node_ordering,
+                                fx_graph_opt,
+                                solver_time,
+                            ) = b.run_node_ordering_v2(graph, fx_graph, fx_to_df_map, alpha, beta, True, False)
+                            cof_a.append(alpha)
+                            cof_b.append(beta)
+                            memory_usage.append(round(peak_mem_usage / GB, 4))
+                            memory_reduction.append(round(((simulated_peak_mem_usage - peak_mem_usage) / simulated_peak_mem_usage) * 100, 6))
+                    print(cof_a)
+                    print(cof_b)
+                    print(memory_usage)
+                    print(memory_reduction)
+                    rows = zip(cof_a, cof_b, memory_usage, memory_reduction)
+                    with open("cof_data.csv", "w", newline="") as file:
+                        writer = csv.writer(file)
+                        writer.writerow(["Alpha", "Beta", "Memory_Usage", "Memory_Reduction"])
+                        writer.writerows(rows)
+                    print(
+                        f"  SIMULATED PEAK MEM USAGE IS {simulated_peak_mem_usage / GB:.4f} GB",
+                        flush=True,
+                    )
+                    exit(0)
 
                 if not args.skip_node_ordering:
                     assert (
@@ -741,13 +855,30 @@ if __name__ == "__main__":
                     ), "Simulation is required to run node ordering"
                     try:
                         print("  PERFORM NODE REORDERING", flush=True)
-                        (
-                            peak_mem_usage,
-                            node_ordering,
-                            fx_graph_opt,
-                            solver_time,
-                        ) = b.run_node_ordering(graph, fx_graph, fx_to_df_map)
+                        if not args.v2:
+                            print("[DEBUG] origin")
+                            (
+                                peak_mem_usage,
+                                node_ordering,
+                                fx_graph_opt,
+                                solver_time,
+                            ) = b.run_node_ordering(graph, fx_graph, fx_to_df_map)
+                        else:
+                            print("[DEBUG] Running v2 not!")
+                            alpha = 1
+                            beta = 1
+                            (
+                                peak_mem_usage,
+                                node_ordering,
+                                fx_graph_opt,
+                                solver_time,
+                            ) = b.run_node_ordering_v2(graph, fx_graph, fx_to_df_map, alpha, beta, True, False)
 
+                        #) = b.run_node_ordering_v2(graph, fx_graph, fx_to_df_map, 1, 1, True, False)
+                        peak_memory_optimized_usage.append(round(peak_mem_usage / GB, 4))
+                        memory_reduction.append(round(((simulated_peak_mem_usage - peak_mem_usage) / simulated_peak_mem_usage) * 100, 6))
+                        proc_time.append(solver_time)
+                        
                         print(
                             f"  REORDERED NODES IN {solver_time:.1f}s. SIMULATED PEAK MEMORY USAGE WAS {peak_mem_usage / GB:.4f} GB (SAVED {(simulated_peak_mem_usage - peak_mem_usage) / simulated_peak_mem_usage:%})",
                             flush=True,
@@ -861,9 +992,14 @@ if __name__ == "__main__":
                                 memory_budget = min_memory
                                 savings = 1.0 - memory_budget / peak_mem_usage
                                 done = True
-                            overhead, solver_time = b.run_rematerialization(
-                                graph, memory_budget
-                            )
+                            if args.v2:
+                                alpha = 1
+                                beta = 1
+                                overhead, solver_time = b.run_rematerialization_v2(graph, memory_budget, alpha, beta, True, False)
+                            else:
+                                overhead, solver_time = b.run_rematerialization(
+                                    graph, memory_budget
+                                )
                             print(
                                 f"  PLANNED REMATERIALIZATION TO SAVE {savings:%} MEMORY IN {solver_time:.1f}s. INCREASED MODEL LATENCY BY {overhead:%})",
                                 flush=True,
@@ -935,3 +1071,8 @@ if __name__ == "__main__":
                     index=False,
                     float_format="%.4g",
                 )
+    rows = zip(model_name, b_size, peak_memory_usage_bef_opt, peak_memory_optimized_usage, memory_reduction, proc_time)
+    with open("all_model.csv", "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Model", "Batch", "Memory_Usage", "Memory_Opt_Usage", "Memory_Reduction", "Proc_time"])
+        writer.writerows(rows)

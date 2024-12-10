@@ -10,14 +10,20 @@ import logging
 
 
 def get_gurobi_env():
+    return None
     try:
         # Try using an ISV license based on the supplied environment variables
         env = gurobipy.Env.OtherEnv(
-            os.getenv("OLLA_GUROBI_LOGFILE", ""),
-            os.getenv("OLLA_GUROBI_ISV_NAME"),
-            os.getenv("OLLA_GUROBI_ISV_APP_NAME"),
-            int(os.getenv("OLLA_GUROBI_ISV_EXPIRATION")),
-            os.getenv("OLLA_GUROBI_ISV_CODE"),
+            # os.getenv("OLLA_GUROBI_LOGFILE", ""),
+            # os.getenv("OLLA_GUROBI_ISV_NAME"),
+            # os.getenv("OLLA_GUROBI_ISV_APP_NAME"),
+            # int(os.getenv("OLLA_GUROBI_ISV_EXPIRATION")),
+            # os.getenv("OLLA_GUROBI_ISV_CODE"),
+            "~/log",
+            None,
+            "MODEL",
+            20251121,
+            None
         )
         logging.info("Successfully created Gurobi env with ISV license")
     except:
